@@ -4,7 +4,8 @@
 # - Accepts WAV audio via POST /phonemes
 # - Resamples to 16kHz
 # - Uses facebook/wav2vec2-lv-60-espeak-cv-ft to output phonetic labels (NOT words)
-# - Base44 will map these phonemes to its own alphabet.
+# - We avoid Wav2Vec2Processor (which is currently buggy) and instead use
+#   FeatureExtractor + Phoneme Tokenizer directly.
 
 import io
 
@@ -16,7 +17,6 @@ from fastapi.responses import JSONResponse
 from transformers import (
     Wav2Vec2FeatureExtractor,
     Wav2Vec2PhonemeCTCTokenizer,
-    Wav2Vec2Processor,
     Wav2Vec2ForCTC,
 )
 
@@ -33,36 +33,46 @@ MODEL_CONFIGS = {
     "mul": DEFAULT_MODEL_NAME,
 }
 
-_processors = {}
+_feature_extractors = {}
+_tokenizers = {}
 _models = {}
 
 
-def get_model_and_processor(lang_key: str):
+def get_components(lang_key: str):
     """
-    Get (processor, model_name, model) for the given language key.
-    Explicitly build a processor from a phoneme tokenizer + feature extractor.
+    Get (feature_extractor, tokenizer, model_name, model) for the given language key.
+    We explicitly construct the parts instead of using Wav2Vec2Processor to avoid
+    the 'bool tokenizer' bug in recent transformers versions.
     """
     if lang_key not in MODEL_CONFIGS:
         lang_key = "default"
 
     model_name = MODEL_CONFIGS[lang_key]
 
-    # Build processor with explicit phoneme tokenizer + feature extractor
-    if model_name not in _processors:
-        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-        tokenizer = Wav2Vec2PhonemeCTCTokenizer.from_pretrained(model_name)
-        processor = Wav2Vec2Processor(
-            feature_extractor=feature_extractor,
-            tokenizer=tokenizer,
+    # Load feature extractor
+    if model_name not in _feature_extractors:
+        _feature_extractors[model_name] = Wav2Vec2FeatureExtractor.from_pretrained(
+            model_name
         )
-        _processors[model_name] = processor
 
+    # Load phoneme tokenizer (requires phonemizer + espeak installed)
+    if model_name not in _tokenizers:
+        _tokenizers[model_name] = Wav2Vec2PhonemeCTCTokenizer.from_pretrained(
+            model_name
+        )
+
+    # Load model
     if model_name not in _models:
         model = Wav2Vec2ForCTC.from_pretrained(model_name)
         model.eval()
         _models[model_name] = model
 
-    return _processors[model_name], model_name, _models[model_name]
+    return (
+        _feature_extractors[model_name],
+        _tokenizers[model_name],
+        model_name,
+        _models[model_name],
+    )
 
 
 def load_and_resample_to_16k(wav_bytes: bytes) -> torch.Tensor:
@@ -98,6 +108,7 @@ async def phonemes(
         "audio/x-wav",
         "audio/wave",
         "audio/vnd.wave",
+        None,  # some browsers omit content-type, we can be lenient
     ):
         raise HTTPException(
             status_code=400,
@@ -108,10 +119,10 @@ async def phonemes(
         wav_bytes = await file.read()
         waveform = load_and_resample_to_16k(wav_bytes)
 
-        processor, model_name, model = get_model_and_processor(lang_key=lang)
+        feature_extractor, tokenizer, model_name, model = get_components(lang_key=lang)
 
         with torch.no_grad():
-            inputs = processor(
+            inputs = feature_extractor(
                 waveform,
                 sampling_rate=TARGET_SR,
                 return_tensors="pt",
@@ -121,7 +132,7 @@ async def phonemes(
             predicted_ids = torch.argmax(logits, dim=-1)
 
             # Decode to a string of phonetic labels (NOT words)
-            transcription = processor.batch_decode(predicted_ids)[0]
+            transcription = tokenizer.batch_decode(predicted_ids)[0]
 
         return JSONResponse(
             content={
@@ -133,4 +144,3 @@ async def phonemes(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Phoneme recognition failed: {e}")
-
