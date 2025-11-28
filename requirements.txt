@@ -6,4 +6,5 @@ torchaudio
 soundfile
 python-multipart
 protobuf==3.20.3
+phonemizer
 
