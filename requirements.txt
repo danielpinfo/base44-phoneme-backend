@@ -4,3 +4,4 @@ transformers
 torch
 torchaudio
 soundfile
+python-multipart
