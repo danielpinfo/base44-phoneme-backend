@@ -5,3 +5,4 @@ torch
 torchaudio
 soundfile
 python-multipart
+protobuf
