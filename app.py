@@ -3,7 +3,7 @@
 # FastAPI backend for Base44 using wav2vec2 phoneme models.
 # - Accepts WAV audio via POST /phonemes
 # - Resamples to 16kHz
-# - Uses wav2vec2-lv-60-espeak-cv-ft to output phonetic labels (NOT words)
+# - Uses facebook/wav2vec2-lv-60-espeak-cv-ft to output phonetic labels (NOT words)
 # - Base44 will map these phonemes to its own alphabet.
 
 import io
@@ -13,7 +13,12 @@ import torchaudio
 import soundfile as sf
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
+from transformers import (
+    Wav2Vec2FeatureExtractor,
+    Wav2Vec2PhonemeCTCTokenizer,
+    Wav2Vec2Processor,
+    Wav2Vec2ForCTC,
+)
 
 app = FastAPI(title="Base44 wav2vec2 Phoneme Backend")
 
@@ -35,14 +40,23 @@ _models = {}
 def get_model_and_processor(lang_key: str):
     """
     Get (processor, model_name, model) for the given language key.
+    Explicitly build a processor from a phoneme tokenizer + feature extractor.
     """
     if lang_key not in MODEL_CONFIGS:
         lang_key = "default"
 
     model_name = MODEL_CONFIGS[lang_key]
 
+    # Build processor with explicit phoneme tokenizer + feature extractor
     if model_name not in _processors:
-        _processors[model_name] = Wav2Vec2Processor.from_pretrained(model_name)
+        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
+        tokenizer = Wav2Vec2PhonemeCTCTokenizer.from_pretrained(model_name)
+        processor = Wav2Vec2Processor(
+            feature_extractor=feature_extractor,
+            tokenizer=tokenizer,
+        )
+        _processors[model_name] = processor
+
     if model_name not in _models:
         model = Wav2Vec2ForCTC.from_pretrained(model_name)
         model.eval()
@@ -74,13 +88,17 @@ def load_and_resample_to_16k(wav_bytes: bytes) -> torch.Tensor:
 @app.post("/phonemes")
 async def phonemes(
     file: UploadFile = File(...),
-    lang: str = "eng"  # logical language key: "eng", "mul", etc.
+    lang: str = "eng",  # logical language key: "eng", "mul", etc.
 ):
     """
     Accept a WAV file and return phoneme sequence using a wav2vec2 phoneme model.
     """
-
-    if file.content_type not in ("audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"):
+    if file.content_type not in (
+        "audio/wav",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/vnd.wave",
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported content-type {file.content_type}. Please upload a WAV file.",
@@ -96,7 +114,7 @@ async def phonemes(
             inputs = processor(
                 waveform,
                 sampling_rate=TARGET_SR,
-                return_tensors="pt"
+                return_tensors="pt",
             )
 
             logits = model(inputs.input_values).logits
@@ -107,7 +125,7 @@ async def phonemes(
 
         return JSONResponse(
             content={
-                "phonemes": transcription,   # e.g. "b l iː s l i b uː s"
+                "phonemes": transcription,  # e.g. "b l iː s l i b uː s"
                 "lang": lang,
                 "model": model_name,
             }
@@ -115,3 +133,4 @@ async def phonemes(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Phoneme recognition failed: {e}")
+
