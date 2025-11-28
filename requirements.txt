@@ -5,4 +5,5 @@ torch
 torchaudio
 soundfile
 python-multipart
-protobuf
+protobuf==3.20.3
+
