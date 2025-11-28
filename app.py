@@ -1,14 +1,11 @@
 # app.py
 #
-# FastAPI backend for Base44 using wav2vec2-lv-60-espeak-cv-ft.
-# This follows the official Hugging Face usage:
-#   - Wav2Vec2Processor.from_pretrained(...)
-#   - Wav2Vec2ForCTC.from_pretrained(...)
-#   - processor(...).input_values
-#   - processor.batch_decode(...)
-#
-# No custom tokenizer wiring, no phoneme tokenizer class – we let
-# the official processor handle it.
+# FastAPI backend for Base44 using a stable wav2vec2 CTC model.
+# - Accepts WAV audio via POST /phonemes
+# - Resamples to 16kHz
+# - Uses facebook/wav2vec2-base-960h to output character sequences
+# - Converts that to a space-separated sequence of characters,
+#   e.g., "bleesleboos" -> "b l e e s l e b o o s"
 
 import io
 
@@ -19,14 +16,14 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
 
-app = FastAPI(title="Base44 wav2vec2 Phoneme Backend")
+app = FastAPI(title="Base44 wav2vec2 Backend")
 
 TARGET_SR = 16000  # wav2vec2 expects 16kHz audio
 
-MODEL_NAME = "facebook/wav2vec2-lv-60-espeak-cv-ft"
+# Stable CTC model
+MODEL_NAME = "facebook/wav2vec2-base-960h"
 
-# Load processor + model once at startup (as in the Hugging Face example)
-# https://huggingface.co/facebook/wav2vec2-lv-60-espeak-cv-ft :contentReference[oaicite:1]{index=1}
+# Load processor + model once at startup
 processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
 model = Wav2Vec2ForCTC.from_pretrained(MODEL_NAME)
 model.eval()
@@ -39,9 +36,8 @@ def load_and_resample_to_16k(wav_bytes: bytes) -> torch.Tensor:
     with io.BytesIO(wav_bytes) as buf:
         audio, sr = sf.read(buf, dtype="float32")
 
-    # If stereo, convert to mono
     if audio.ndim > 1:
-        audio = audio.mean(axis=1)
+        audio = audio.mean(axis=1)  # average stereo to mono
 
     waveform = torch.from_numpy(audio)
 
@@ -56,15 +52,20 @@ def load_and_resample_to_16k(wav_bytes: bytes) -> torch.Tensor:
 @app.post("/phonemes")
 async def phonemes(file: UploadFile = File(...)):
     """
-    Accept a WAV file and return a phoneme sequence using wav2vec2-lv-60-espeak-cv-ft.
+    Accept a WAV file and return a "phoneme-like" character sequence.
+    Response example:
+    {
+      "phonemes": "b l e e s l e b o o s",
+      "raw_transcription": "bleesleboos",
+      "model": "facebook/wav2vec2-base-960h"
+    }
     """
-    # Be lenient about content-type – some browsers omit it
     if file.content_type not in (
         "audio/wav",
         "audio/x-wav",
         "audio/wave",
         "audio/vnd.wave",
-        None,
+        None,  # some browsers omit it
     ):
         raise HTTPException(
             status_code=400,
@@ -75,8 +76,6 @@ async def phonemes(file: UploadFile = File(...)):
         wav_bytes = await file.read()
         waveform = load_and_resample_to_16k(wav_bytes)
 
-        # Hugging Face example pattern:
-        # input_values = processor(ds[0]["audio"]["array"], return_tensors="pt").input_values
         with torch.no_grad():
             inputs = processor(
                 waveform,
@@ -88,18 +87,23 @@ async def phonemes(file: UploadFile = File(...)):
             logits = model(input_values).logits
             predicted_ids = torch.argmax(logits, dim=-1)
 
-            # This returns a list of strings; we take the first one
-            # Example from model card:
-            # ['m ɪ s t ɚ k w ɪ l t ɚ ...'] :contentReference[oaicite:2]{index=2}
-            transcription_list = processor.batch_decode(predicted_ids)
-            transcription = transcription_list[0] if transcription_list else ""
+            decoded = processor.batch_decode(predicted_ids)
+            transcription = decoded[0].strip().lower() if decoded else ""
+
+            # Keep only letters and apostrophes
+            cleaned = "".join(ch for ch in transcription if ch.isalpha() or ch == "'")
+
+            # "bleesleboos" -> "b l e e s l e b o o s"
+            spaced_chars = " ".join(list(cleaned)) if cleaned else ""
 
         return JSONResponse(
             content={
-                "phonemes": transcription,
+                "phonemes": spaced_chars,
+                "raw_transcription": transcription,
                 "model": MODEL_NAME,
             }
         )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Phoneme recognition failed: {e}")
+
