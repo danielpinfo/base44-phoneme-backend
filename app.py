@@ -1,4 +1,16 @@
-# app.py
+#import io
+import numpy as np
+import torch
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+import torchaudio
+import soundfile as sf
+TARGET_SR = 16000
+
+# Max voiced audio you will process — enough for full sentences
+MAX_SECONDS_SENTENCE = 10
+MAX_SAMPLES_SENTENCE = TARGET_SR * MAX_SECONDS_SENTENCE
+ app.py
 #
 # FastAPI backend for Base44 using a stable wav2vec2 CTC model.
 # - Accepts WAV audio via POST /phonemes
@@ -28,26 +40,63 @@ processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
 model = Wav2Vec2ForCTC.from_pretrained(MODEL_NAME)
 model.eval()
 
+def trim_silence(waveform: torch.Tensor, sr: int, threshold: float = 0.01) -> torch.Tensor:
+    """
+    Remove leading and trailing silence using a simple amplitude-based threshold.
+    """
+    if waveform.ndim != 1:
+        waveform = waveform.view(-1)
+
+    # Convert to numpy for easier operations
+    audio_np = waveform.numpy()
+    energy = np.abs(audio_np)
+
+    # Find all non-silent indices
+    voiced = np.where(energy > threshold)[0]
+    if len(voiced) == 0:
+        # All silence — return very short slice so model doesn't break
+        return waveform[: sr // 10]
+
+    start = voiced[0]
+    end = voiced[-1] + 1
+
+    # Add a small margin (0.1 sec)
+    margin = int(0.1 * sr)
+    start = max(0, start - margin)
+    end = min(len(audio_np), end + margin)
+
+    trimmed = waveform[start:end]
+    return trimmed
 
 def load_and_resample_to_16k(wav_bytes: bytes) -> torch.Tensor:
     """
-    Load audio from bytes, convert to mono float32 tensor, resample to 16kHz.
+    Load WAV bytes, ensure mono, trim silence,
+    resample to 16k, and cap to max sentence length.
     """
+    # Load audio
     with io.BytesIO(wav_bytes) as buf:
         audio, sr = sf.read(buf, dtype="float32")
 
+    # Stereo → mono
     if audio.ndim > 1:
-        audio = audio.mean(axis=1)  # average stereo to mono
+        audio = audio.mean(axis=1)
 
     waveform = torch.from_numpy(audio)
 
+    # 1. Trim silence BEFORE resampling
+    waveform = trim_silence(waveform, sr)
+
+    # 2. Resample to 16k
     if sr != TARGET_SR:
         waveform = torchaudio.functional.resample(
             waveform, orig_freq=sr, new_freq=TARGET_SR
         )
 
-    return waveform
+    # 3. Cap to max length (10 seconds)
+    if waveform.shape[0] > MAX_SAMPLES_SENTENCE:
+        waveform = waveform[:MAX_SAMPLES_SENTENCE]
 
+    return waveform
 
 @app.post("/phonemes")
 async def phonemes(file: UploadFile = File(...)):
