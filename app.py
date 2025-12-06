@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torchaudio
 import soundfile as sf
-
+from phoneme.ipa_lookup import get_ipa_for_text
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
 from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
