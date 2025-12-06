@@ -8,27 +8,27 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
 from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
 
-# Import phonemizer helper (now correctly stored in phoneme/ipa_lookup.py)
+# Import phonemizer helper (stored in phoneme/ipa_lookup.py)
 from phoneme.ipa_lookup import get_ipa_for_text
 
-# Limit PyTorch CPU threads (helps on small CPU instances like Railway)
+# ----------------------------------------------------------------------
+# Torch settings (helps on small CPU instances like Railway)
+# ----------------------------------------------------------------------
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
-# ---------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # App bootstrap
-# ---------------------------------------------------------------------------------
-
+# ----------------------------------------------------------------------
 app = FastAPI(title="Base44 Multi-Language wav2vec2 Backend")
 
 TARGET_SR = 16000
 MAX_SECONDS_SENTENCE = 10
 MAX_SAMPLES_SENTENCE = TARGET_SR * MAX_SECONDS_SENTENCE
 
-# ---------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # wav2vec2 models per language
-# ---------------------------------------------------------------------------------
-
+# ----------------------------------------------------------------------
 LANG_MODELS: dict[str, str] = {
     "en": "facebook/wav2vec2-base-960h",                         # English
     "es": "jonatasgrosman/wav2vec2-large-xlsr-53-spanish",       # Spanish
@@ -40,10 +40,9 @@ LANG_MODELS: dict[str, str] = {
     "ja": "ku-nlp/wav2vec2-large-xlsr-japanese",                 # Japanese
 }
 
-# ---------------------------------------------------------------------------------
-# Practice word lists (not used yet, but useful for frontend)
-# ---------------------------------------------------------------------------------
-
+# ----------------------------------------------------------------------
+# Practice word lists (for future use by the frontend)
+# ----------------------------------------------------------------------
 PRACTICE_WORDS: dict[str, list[dict]] = {
     "en": [
         {"id": "hello", "text": "hello", "translation": "hello", "hint": "Basic greeting"},
@@ -87,15 +86,18 @@ PRACTICE_WORDS: dict[str, list[dict]] = {
     ],
 }
 
-# ---------------------------------------------------------------------------------
-# Lazy loading of models
-# ---------------------------------------------------------------------------------
-
+# ----------------------------------------------------------------------
+# Lazy loading of wav2vec2 models
+# ----------------------------------------------------------------------
 processors: dict[str, Wav2Vec2Processor] = {}
 models: dict[str, Wav2Vec2ForCTC] = {}
 
 
 def get_model_and_processor(lang: str):
+    """
+    Return (processor, model) for the given language.
+    Models are loaded lazily on first use.
+    """
     if lang not in LANG_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported language '{lang}'")
 
@@ -111,11 +113,17 @@ def get_model_and_processor(lang: str):
 
     return processors[lang], models[lang]
 
-# ---------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Audio handling
-# ---------------------------------------------------------------------------------
-
-def trim_silence(waveform: torch.Tensor, sr: int, threshold: float = 0.01) -> torch.Tensor:
+# ----------------------------------------------------------------------
+def trim_silence(
+    waveform: torch.Tensor,
+    sr: int,
+    threshold: float = 0.01,
+) -> torch.Tensor:
+    """
+    Remove leading/trailing silence using a simple amplitude threshold.
+    """
     if waveform.ndim != 1:
         waveform = waveform.view(-1)
 
@@ -124,6 +132,7 @@ def trim_silence(waveform: torch.Tensor, sr: int, threshold: float = 0.01) -> to
 
     voiced = np.where(energy > threshold)[0]
     if len(voiced) == 0:
+        # All silence — avoid empty tensors
         return waveform[: sr // 10]
 
     start = int(voiced[0])
@@ -137,31 +146,41 @@ def trim_silence(waveform: torch.Tensor, sr: int, threshold: float = 0.01) -> to
 
 
 def load_and_resample_to_16k(wav_bytes: bytes) -> torch.Tensor:
+    """
+    Load WAV bytes, mono-ize, trim silence, resample to 16k, cap to max length.
+    """
     with io.BytesIO(wav_bytes) as buf:
         audio, sr = sf.read(buf, dtype="float32")
 
+    # Stereo → mono
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
 
     waveform = torch.from_numpy(audio)
+
+    # 1. Trim silence at original sample rate
     waveform = trim_silence(waveform, sr)
 
+    # 2. Resample to 16k
     if sr != TARGET_SR:
         waveform = torchaudio.functional.resample(
             waveform, orig_freq=sr, new_freq=TARGET_SR
         )
 
+    # 3. Cap to max length (10 seconds of audio at 16k)
     if waveform.shape[0] > MAX_SAMPLES_SENTENCE:
         waveform = waveform[:MAX_SAMPLES_SENTENCE]
 
     return waveform
 
-# ---------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Endpoints: languages + practice words
-# ---------------------------------------------------------------------------------
-
+# ----------------------------------------------------------------------
 @app.get("/languages")
 async def list_languages():
+    """
+    Frontend can call this to build the language picker.
+    """
     return [
         {"code": "en", "nativeName": "English",        "englishName": "English",           "flag": "🇺🇸"},
         {"code": "es", "nativeName": "Español",        "englishName": "Spanish",           "flag": "🇪🇸"},
@@ -176,8 +195,11 @@ async def list_languages():
 
 @app.get("/practice-words")
 async def get_practice_words(
-    lang: str = Query("en", description="Language code"),
+    lang: str = Query("en", description="Language code: en, es, fr, de, it, pt, zh, ja"),
 ):
+    """
+    Return practice words for a given language.
+    """
     if lang not in PRACTICE_WORDS:
         raise HTTPException(status_code=400, detail=f"Unsupported language '{lang}'")
 
@@ -186,18 +208,106 @@ async def get_practice_words(
         "words": PRACTICE_WORDS[lang],
     }
 
-# ---------------------------------------------------------------------------------
-# IPA lookup endpoint
-# ---------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Core: /phonemes – wav2vec2 + Phonemizer IPA mirror
+# ----------------------------------------------------------------------
+@app.post("/phonemes")
+async def phonemes(
+    file: UploadFile = File(...),
+    lang: str = Query("en", description="Language code: en, es, fr, de, it, pt, zh, ja"),
+):
+    """
+    Accept a WAV file + language code, return:
+      - grapheme-like 'phonemes' (spaced characters)
+      - raw transcription from wav2vec2
+      - IPA string from Phonemizer
+      - IPA units (list) for frontend phoneme mirror
 
+    Example response:
+    {
+      "lang": "en",
+      "phonemes": "h e l l o",
+      "raw_transcription": "hello",
+      "ipa": "h ə l oʊ",
+      "ipa_units": ["h", "ə", "l", "oʊ"],
+      "model": "facebook/wav2vec2-base-960h"
+    }
+    """
+    if file.content_type not in (
+        "audio/wav",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/vnd.wave",
+        None,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported content-type {file.content_type}. Please upload a WAV file.",
+        )
+
+    processor, model = get_model_and_processor(lang)
+
+    try:
+        # 1) Read + preprocess audio
+        wav_bytes = await file.read()
+        waveform = load_and_resample_to_16k(wav_bytes)
+
+        # 2) Run wav2vec2 → transcription (characters/letters)
+        with torch.no_grad():
+            inputs = processor(
+                waveform,
+                sampling_rate=TARGET_SR,
+                return_tensors="pt",
+            )
+            logits = model(inputs.input_values).logits
+            predicted_ids = torch.argmax(logits, dim=-1)
+
+            decoded = processor.batch_decode(predicted_ids)
+            transcription = decoded[0].strip() if decoded else ""
+
+            # Keep "letters" from any script (Latin, kana, han, etc.) + apostrophe.
+            # .isalpha() is Unicode-aware, so it works for Japanese, Chinese, etc.
+            cleaned = "".join(ch for ch in transcription if ch.isalpha() or ch == "'")
+
+            # "hello" -> "h e l l o", "日本語" -> "日 本 語"
+            spaced_chars = " ".join(list(cleaned)) if cleaned else ""
+
+        # 3) Phonemizer: get IPA for the transcription (our mirror's "should sound like")
+        ipa_str = get_ipa_for_text(transcription, lang) if transcription else ""
+        ipa_units = ipa_str.split() if ipa_str else []
+
+        return JSONResponse(
+            content={
+                "lang": lang,
+                "phonemes": spaced_chars,          # grapheme-like sequence (for debug / legacy)
+                "raw_transcription": transcription,
+                "ipa": ipa_str,                    # full IPA string
+                "ipa_units": ipa_units,            # IPA segments for the frontend
+                "model": LANG_MODELS[lang],
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Phoneme recognition failed: {e}")
+
+# ----------------------------------------------------------------------
+# IPA lookup endpoint (text-only, no audio)
+# ----------------------------------------------------------------------
 @app.get("/expected_ipa")
 async def expected_ipa(
     text: str = Query(..., description="Letter or word"),
-    lang: str = Query("en", description="Language code"),
+    lang: str = Query("en", description="Language code: en, es, fr, de, it, pt, zh, ja"),
 ):
+    """
+    Return canonical IPA for the given target text + language,
+    using the Phonemizer helper (get_ipa_for_text).
+
+    This does NOT do any audio processing – it's just:
+      "What SHOULD this letter/word sound like?"
+    """
     ipa = get_ipa_for_text(text, lang)
     return {
-      "text": text,
-      "lang": lang,
-      "ipa": ipa,
+        "text": text,
+        "lang": lang,
+        "ipa": ipa,
     }
