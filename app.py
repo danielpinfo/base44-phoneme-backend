@@ -192,94 +192,55 @@ async def get_practice_words(
     }
 
 
-@app.post("/phonemes")
-async def phonemes(
-    file: UploadFile = File(...),
-    lang: str = Query(
-        "en",
-        description="Language code: en, es, fr, de, it, pt, zh, ja",
-    ),
-):
-    """
-    Accept a WAV file + language code, return:
-      • raw_transcription  – what wav2vec2 thinks you said (text)
-      • phonemes           – spaced characters (legacy, for existing UI)
-      • ipa                – IPA string for that transcription
-      • ipa_units          – IPA tokens as a list
+# phoneme/ipa_lookup.py
 
-    Example response:
-    {
-      "lang": "en",
-      "raw_transcription": "hello",
-      "phonemes": "h e l l o",
-      "ipa": "h ə ˈl oʊ",
-      "ipa_units": ["h", "ə", "ˈl", "oʊ"],
-      "model": "facebook/wav2vec2-base-960h"
-    }
-    """
-    if file.content_type not in (
-        "audio/wav",
-        "audio/x-wav",
-        "audio/wave",
-        "audio/vnd.wave",
-        None,
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported content-type {file.content_type}. Please upload a WAV file.",
-        )
+from phonemizer import phonemize
 
-    processor, model = get_model_and_processor(lang)
+# Map our short language codes to Phonemizer's language identifiers
+LANG_TO_PHONEMIZER = {
+    "en": "en-us",
+    "es": "es",
+    "fr": "fr-fr",
+    "de": "de",
+    "it": "it",
+    "pt": "pt",
+    "zh": "zh",      # Mandarin (approximate)
+    "ja": "ja",      # Japanese (approximate)
+}
+
+
+def get_ipa_for_text(text: str, lang: str) -> str:
+    """
+    Return IPA string for the given text and language.
+
+    - Uses Phonemizer (espeak backend)
+    - Returns a space-separated IPA sequence, e.g.:
+        "hello" (en) -> "h ə l oʊ"
+        "m"     (en) -> "m"
+        "m"     (es) -> "m"
+    - On error, falls back to spacing the original text.
+    """
+    if not text:
+        return ""
+
+    base_lang = (lang or "en")[:2].lower()
+    phon_lang = LANG_TO_PHONEMIZER.get(base_lang, "en-us")
 
     try:
-        # 1) Read + preprocess audio
-        wav_bytes = await file.read()
-        waveform = load_and_resample_to_16k(wav_bytes)
-
-        # 2) Run wav2vec2 ASR
-        with torch.no_grad():
-            inputs = processor(
-                waveform,
-                sampling_rate=TARGET_SR,
-                return_tensors="pt",
-            )
-            logits = model(inputs.input_values).logits
-            predicted_ids = torch.argmax(logits, dim=-1)
-
-            decoded = processor.batch_decode(predicted_ids)
-            transcription = decoded[0].strip() if decoded else ""
-
-        # 3) Legacy "spaced characters" representation
-        #    Keep letters from any script (Latin, kana, han, etc.) + apostrophe.
-        cleaned = "".join(ch for ch in transcription if ch.isalpha() or ch == "'")
-        spaced_chars = " ".join(list(cleaned)) if cleaned else ""
-
-        # 4) NEW: IPA for what we think was said
-        #    Use our Phonemizer-based helper: get_ipa_for_text(text, lang)
-        try:
-            detected_ipa = get_ipa_for_text(transcription, lang)
-        except Exception as ipa_err:
-            # We never want IPA failure to break the whole request
-            detected_ipa = ""
-            print(f"[phonemes] IPA lookup failed: {ipa_err}")
-
-        ipa_units = detected_ipa.split() if detected_ipa else []
-
-        return JSONResponse(
-            content={
-                "lang": lang,
-                "raw_transcription": transcription,
-                "phonemes": spaced_chars,   # legacy char-level view
-                "ipa": detected_ipa,        # NEW: IPA string mirror
-                "ipa_units": ipa_units,     # NEW: IPA tokens
-                "model": LANG_MODELS[lang],
-            }
+        ipa = phonemize(
+            text,
+            language=phon_lang,
+            backend="espeak",
+            strip=True,                  # no trailing separators
+            preserve_punctuation=False,  # just phones
+            with_stress=False,           # we can turn on later if needed
+            njobs=1,
         )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Phoneme recognition failed: {e}"
-        )
+        # Phonemizer may return multi-word strings; we keep as-is but stripped
+        return ipa.strip()
+    except Exception:
+        # Safe fallback: just space the characters
+        return " ".join(list(text))
 
 @app.get("/expected_ipa")
 async def expected_ipa(
