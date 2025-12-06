@@ -195,16 +195,25 @@ async def get_practice_words(
 @app.post("/phonemes")
 async def phonemes(
     file: UploadFile = File(...),
-    lang: str = Query("en", description="Language code: en, es, fr, de, it, pt, zh, ja"),
+    lang: str = Query(
+        "en",
+        description="Language code: en, es, fr, de, it, pt, zh, ja",
+    ),
 ):
     """
-    Accept a WAV file + language code, return a 'phoneme-like' character sequence.
+    Accept a WAV file + language code, return:
+      • raw_transcription  – what wav2vec2 thinks you said (text)
+      • phonemes           – spaced characters (legacy, for existing UI)
+      • ipa                – IPA string for that transcription
+      • ipa_units          – IPA tokens as a list
 
-    Response example:
+    Example response:
     {
       "lang": "en",
-      "phonemes": "h e l l o",
       "raw_transcription": "hello",
+      "phonemes": "h e l l o",
+      "ipa": "h ə ˈl oʊ",
+      "ipa_units": ["h", "ə", "ˈl", "oʊ"],
       "model": "facebook/wav2vec2-base-960h"
     }
     """
@@ -223,9 +232,11 @@ async def phonemes(
     processor, model = get_model_and_processor(lang)
 
     try:
+        # 1) Read + preprocess audio
         wav_bytes = await file.read()
         waveform = load_and_resample_to_16k(wav_bytes)
 
+        # 2) Run wav2vec2 ASR
         with torch.no_grad():
             inputs = processor(
                 waveform,
@@ -238,24 +249,38 @@ async def phonemes(
             decoded = processor.batch_decode(predicted_ids)
             transcription = decoded[0].strip() if decoded else ""
 
-            # Keep "letters" from any script (Latin, kana, han, etc.) + apostrophe.
-            # .isalpha() is Unicode-aware, so it works for Japanese, Chinese, etc.
-            cleaned = "".join(ch for ch in transcription if ch.isalpha() or ch == "'")
+        # 3) Legacy "spaced characters" representation
+        #    Keep letters from any script (Latin, kana, han, etc.) + apostrophe.
+        cleaned = "".join(ch for ch in transcription if ch.isalpha() or ch == "'")
+        spaced_chars = " ".join(list(cleaned)) if cleaned else ""
 
-            # "hello" -> "h e l l o", "日本語" -> "日 本 語"
-            spaced_chars = " ".join(list(cleaned)) if cleaned else ""
+        # 4) NEW: IPA for what we think was said
+        #    Use our Phonemizer-based helper: get_ipa_for_text(text, lang)
+        try:
+            detected_ipa = get_ipa_for_text(transcription, lang)
+        except Exception as ipa_err:
+            # We never want IPA failure to break the whole request
+            detected_ipa = ""
+            print(f"[phonemes] IPA lookup failed: {ipa_err}")
+
+        ipa_units = detected_ipa.split() if detected_ipa else []
 
         return JSONResponse(
             content={
                 "lang": lang,
-                "phonemes": spaced_chars,
                 "raw_transcription": transcription,
+                "phonemes": spaced_chars,   # legacy char-level view
+                "ipa": detected_ipa,        # NEW: IPA string mirror
+                "ipa_units": ipa_units,     # NEW: IPA tokens
                 "model": LANG_MODELS[lang],
             }
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Phoneme recognition failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Phoneme recognition failed: {e}"
+        )
+
 @app.get("/expected_ipa")
 async def expected_ipa(
     text: str = Query(..., description="The target text (letter or word)"),
