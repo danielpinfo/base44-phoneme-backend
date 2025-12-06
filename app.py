@@ -256,5 +256,21 @@ async def phonemes(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Phoneme recognition failed: {e}")
+@app.get("/expected_ipa")
+async def expected_ipa(
+    text: str = Query(..., description="The target text (letter or word)"),
+    lang: str = Query("en", description="Language code: en, es, fr, de, it, pt, zh, ja"),
+):
+    """
+    Return canonical IPA for the given target text + language,
+    using the Phonemizer helper (get_ipa_for_text).
+    This does NOT do any audio processing – it's just for 'what SHOULD it sound like?'.
+    """
+    ipa = get_ipa_for_text(text, lang)
+    return {
+      "text": text,
+      "lang": lang,
+      "ipa": ipa,
+    }
 
 
