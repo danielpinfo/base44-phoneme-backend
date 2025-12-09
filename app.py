@@ -211,60 +211,7 @@ async def get_practice_words(
     }
 
 # ----------------------------------------------------------------------
-# Phoneme "cleaner" – Spanish-friendly syllable-ish output
-# ----------------------------------------------------------------------
-GHOST_TAILS = {"hua", "wa", "che", "je", "we"}
-
-
-def clean_phonemes_for_letter(raw_text: str, lang: str) -> dict:
-    """
-    Normalize wav2vec2 transcription into short, syllable-ish tokens.
-
-    Behavior (Spanish-focused):
-    - lowercase + trim
-    - split on spaces
-    - remove ghost tails like 'hua', 'wa', 'che', etc.
-    - keep at most 2 tokens
-    - choose the first clean token as 'primary'
-
-    For non-Spanish languages, we do a very light cleanup and still expose
-    the same structure so the frontend can use it generically.
-    """
-    if not raw_text:
-        return {
-            "raw_text": raw_text,
-            "tokens": [],
-            "clean_tokens": [],
-            "primary": "",
-        }
-
-    txt = raw_text.lower().strip()
-    tokens = [t for t in txt.split() if t]
-
-    base_lang = (lang or "en")[:2].lower()
-
-    if base_lang == "es":
-        # Remove known ghost tails for Spanish
-        clean_tokens = [t for t in tokens if t not in GHOST_TAILS]
-        if not clean_tokens:
-            clean_tokens = tokens
-        # Limit to 1–2 tokens max
-        clean_tokens = clean_tokens[:2]
-    else:
-        # For other languages, just cap to 2 tokens
-        clean_tokens = tokens[:2] if tokens else []
-
-    primary = clean_tokens[0] if clean_tokens else ""
-
-    return {
-        "raw_text": raw_text,
-        "tokens": tokens,
-        "clean_tokens": clean_tokens,
-        "primary": primary,
-    }
-
-# ----------------------------------------------------------------------
-# Core: /phonemes – wav2vec2 + Phonemizer IPA mirror + CLEANER
+# Core: /phonemes – wav2vec2 + Phonemizer IPA = "alien phoneme stream"
 # ----------------------------------------------------------------------
 @app.post("/phonemes")
 async def phonemes(
@@ -272,14 +219,19 @@ async def phonemes(
     lang: str = Query("en", description="Language code: en, es, fr, de, it, pt, zh, ja"),
 ):
     """
-    Accept a WAV file + language code, return:
-      - grapheme-like 'phonemes' (spaced characters)
-      - raw transcription from wav2vec2
-      - IPA string from Phonemizer
-      - IPA units (list) for frontend phoneme mirror
-      - cleaned syllable-ish tokens (for letter practice)
-      - primary syllable (the main 'what you said')
+    Accept a WAV file + language code and return a purely "phoneme-oriented" view.
+
+    IMPORTANT DESIGN CHOICE:
+    ------------------------
+    - The *computational core* of SoundMirror/Letter Practice should not care about words.
+    - This endpoint therefore exposes only:
+        * wav2vec2 transcription (for debugging / feeding phonemizer),
+        * IPA string, IPA units,
+        * a 'phoneme_list' derived from the IPA units,
+        * a simple 'phonemes' string for convenience (joined with '-').
+    - No attempt is made to guess a real word like "WHAT" or "THEM" for scoring.
     """
+    # Basic content-type check; we still just want WAV here.
     if file.content_type not in (
         "audio/wav",
         "audio/x-wav",
@@ -299,7 +251,8 @@ async def phonemes(
         wav_bytes = await file.read()
         waveform = load_and_resample_to_16k(wav_bytes)
 
-        # 2) Run wav2vec2 → transcription (characters/letters)
+        # 2) Run wav2vec2 → rough transcription (characters/letters)
+        #    We treat this as an internal stepping stone ONLY, not as the final "truth".
         with torch.no_grad():
             inputs = processor(
                 waveform,
@@ -312,32 +265,29 @@ async def phonemes(
             decoded = processor.batch_decode(predicted_ids)
             transcription = decoded[0].strip() if decoded else ""
 
-            # Keep "letters" from any script (Latin, kana, han, etc.) + apostrophe.
-            cleaned = "".join(ch for ch in transcription if ch.isalpha() or ch == "'")
-
-            # "hello" -> "h e l l o", "日本語" -> "日 本 語"
-            spaced_chars = " ".join(list(cleaned)) if cleaned else ""
-
         # 3) Phonemizer: get IPA for the transcription
+        #    This is our "alien phoneme world" representation.
         ipa_str = get_ipa_for_text(transcription, lang) if transcription else ""
         ipa_units = ipa_str.split() if ipa_str else []
 
-        # 4) NEW: Clean Spanish-style syllables (and generic for others)
-        cleaned_phonemes = clean_phonemes_for_letter(transcription, lang)
+        # 4) Build the phoneme_list and a simple string representation
+        #    For now, we treat IPA units as the phoneme_list that the frontend can work with.
+        phoneme_list = ipa_units
+        phonemes_joined = "-".join(phoneme_list) if phoneme_list else ""
 
         return JSONResponse(
             content={
                 "lang": lang,
-                "phonemes": spaced_chars,            # grapheme-like sequence (legacy)
-                "raw_transcription": transcription,  # original wav2vec2 output
-                "ipa": ipa_str,                      # full IPA string
-                "ipa_units": ipa_units,              # IPA segments for mirror
+                "backend": "wav2vec2+phonemizer",
+                # "alien" phoneme outputs:
+                "ipa": ipa_str,               # full IPA string
+                "ipa_units": ipa_units,       # list of IPA segments
+                "phoneme_list": phoneme_list, # alias for frontend / SoundMirror
+                "phonemes": phonemes_joined,  # convenience string (e.g. "m-ɛ-n-ə")
                 "model": LANG_MODELS[lang],
-                # NEW fields for letter practice:
-                "raw_text": cleaned_phonemes["raw_text"],
-                "tokens": cleaned_phonemes["tokens"],
-                "clean_tokens": cleaned_phonemes["clean_tokens"],
-                "primary": cleaned_phonemes["primary"],
+                # Debug-only field: the intermediate text wav2vec2 guessed
+                # (You can choose NOT to show this to end users.)
+                "raw_transcription": transcription,
             }
         )
 
