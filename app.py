@@ -23,10 +23,10 @@ torch.set_num_interop_threads(1)
 # ----------------------------------------------------------------------
 app = FastAPI(title="Base44 Multi-Language wav2vec2 Backend")
 
-# CORS: allow frontend (Base44, preview hosts, etc.) to call this backend
+# CORS so Base44 preview / editor can call this directly from the browser
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # you can later restrict this if desired
+    allow_origins=["*"],      # you can tighten this later if you want
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,44 +55,44 @@ LANG_MODELS: dict[str, str] = {
 # ----------------------------------------------------------------------
 PRACTICE_WORDS: dict[str, list[dict]] = {
     "en": [
-        {"id": "hello", "text": "hello", "translation": "hello", "hint": "Basic greeting"},
-        {"id": "water", "text": "water", "translation": "water", "hint": "Common noun"},
-        {"id": "thank_you", "text": "thank you", "translation": "thank you", "hint": "Polite phrase"},
+        {"id": "hello",      "text": "hello",      "translation": "hello",      "hint": "Basic greeting"},
+        {"id": "water",      "text": "water",      "translation": "water",      "hint": "Common noun"},
+        {"id": "thank_you",  "text": "thank you",  "translation": "thank you",  "hint": "Polite phrase"},
     ],
     "es": [
-        {"id": "hola", "text": "hola", "translation": "hello", "hint": "Saludo básico"},
-        {"id": "gracias", "text": "gracias", "translation": "thank you", "hint": "Frase de cortesía"},
-        {"id": "agua", "text": "agua", "translation": "water", "hint": "Sustantivo común"},
+        {"id": "hola",       "text": "hola",       "translation": "hello",      "hint": "Saludo básico"},
+        {"id": "gracias",    "text": "gracias",    "translation": "thank you",  "hint": "Frase de cortesía"},
+        {"id": "agua",       "text": "agua",       "translation": "water",      "hint": "Sustantivo común"},
     ],
     "fr": [
-        {"id": "bonjour", "text": "bonjour", "translation": "hello", "hint": "Salutation"},
-        {"id": "merci", "text": "merci", "translation": "thank you", "hint": "Expression de politesse"},
-        {"id": "eau", "text": "eau", "translation": "water", "hint": "Nom courant"},
+        {"id": "bonjour",    "text": "bonjour",    "translation": "hello",      "hint": "Salutation"},
+        {"id": "merci",      "text": "merci",      "translation": "thank you",  "hint": "Expression de politesse"},
+        {"id": "eau",        "text": "eau",        "translation": "water",      "hint": "Nom courant"},
     ],
     "de": [
-        {"id": "hallo", "text": "hallo", "translation": "hello", "hint": "Begrüßung"},
-        {"id": "danke", "text": "danke", "translation": "thank you", "hint": "Höfliche Wendung"},
-        {"id": "wasser", "text": "wasser", "translation": "water", "hint": "Häufiges Substantiv"},
+        {"id": "hallo",      "text": "hallo",      "translation": "hello",      "hint": "Begrüßung"},
+        {"id": "danke",      "text": "danke",      "translation": "thank you",  "hint": "Höfliche Wendung"},
+        {"id": "wasser",     "text": "wasser",     "translation": "water",      "hint": "Häufiges Substantiv"},
     ],
     "it": [
-        {"id": "ciao", "text": "ciao", "translation": "hi / bye", "hint": "Saluto informale"},
-        {"id": "grazie", "text": "grazie", "translation": "thank you", "hint": "Frase di cortesia"},
-        {"id": "acqua", "text": "acqua", "translation": "water", "hint": "Sostantivo comune"},
+        {"id": "ciao",       "text": "ciao",       "translation": "hi / bye",   "hint": "Saluto informale"},
+        {"id": "grazie",     "text": "grazie",     "translation": "thank you",  "hint": "Frase di cortesia"},
+        {"id": "acqua",      "text": "acqua",      "translation": "water",      "hint": "Sostantivo comune"},
     ],
     "pt": [
-        {"id": "ola", "text": "olá", "translation": "hello", "hint": "Saudação básica"},
-        {"id": "obrigado", "text": "obrigado", "translation": "thank you (m.)", "hint": "Frase de cortesia"},
-        {"id": "agua", "text": "água", "translation": "water", "hint": "Substantivo comum"},
+        {"id": "ola",        "text": "olá",        "translation": "hello",      "hint": "Saudação básica"},
+        {"id": "obrigado",   "text": "obrigado",   "translation": "thank you (m.)", "hint": "Frase de cortesia"},
+        {"id": "agua",       "text": "água",       "translation": "water",      "hint": "Substantivo comum"},
     ],
     "zh": [
-        {"id": "nihao", "text": "你好", "translation": "hello", "hint": "问候语"},
-        {"id": "xiexie", "text": "谢谢", "translation": "thank you", "hint": "礼貌表达"},
-        {"id": "shui", "text": "水", "translation": "water", "hint": "常用名词"},
+        {"id": "nihao",      "text": "你好",        "translation": "hello",      "hint": "问候语"},
+        {"id": "xiexie",     "text": "谢谢",       "translation": "thank you",  "hint": "礼貌表达"},
+        {"id": "shui",       "text": "水",         "translation": "water",      "hint": "常用名词"},
     ],
     "ja": [
-        {"id": "konnichiwa", "text": "こんにちは", "translation": "hello", "hint": "あいさつ"},
-        {"id": "arigatou", "text": "ありがとう", "translation": "thank you", "hint": "ていねいな表現"},
-        {"id": "mizu", "text": "水", "translation": "water", "hint": "よく使う名詞"},
+        {"id": "konnichiwa", "text": "こんにちは",  "translation": "hello",      "hint": "あいさつ"},
+        {"id": "arigatou",   "text": "ありがとう",  "translation": "thank you",  "hint": "ていねいな表現"},
+        {"id": "mizu",       "text": "水",         "translation": "water",      "hint": "よく使う名詞"},
     ],
 }
 
@@ -122,6 +122,7 @@ def get_model_and_processor(lang: str):
         models[lang] = mdl
 
     return processors[lang], models[lang]
+
 
 # ----------------------------------------------------------------------
 # Audio handling
@@ -183,12 +184,14 @@ def load_and_resample_to_16k(wav_bytes: bytes) -> torch.Tensor:
 
     return waveform
 
+
 # ----------------------------------------------------------------------
 # Utility: health check
 # ----------------------------------------------------------------------
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 # ----------------------------------------------------------------------
 # Utility: list languages
@@ -209,6 +212,7 @@ async def list_languages():
         {"code": "ja", "nativeName": "日本語",          "englishName": "Japanese",          "flag": "🇯🇵"},
     ]
 
+
 # ----------------------------------------------------------------------
 # Utility: practice words
 # ----------------------------------------------------------------------
@@ -226,6 +230,7 @@ async def get_practice_words(
         "lang": lang,
         "words": PRACTICE_WORDS[lang],
     }
+
 
 # ----------------------------------------------------------------------
 # Core: /phonemes – wav2vec2 + optional Phonemizer IPA with fallback
@@ -311,6 +316,7 @@ async def phonemes(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Phoneme recognition failed: {e}")
+
 
 # ----------------------------------------------------------------------
 # IPA lookup endpoint (text-only, no audio)
