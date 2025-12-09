@@ -211,7 +211,7 @@ async def get_practice_words(
     }
 
 # ----------------------------------------------------------------------
-# Core: /phonemes – wav2vec2 + Phonemizer IPA = "alien phoneme stream"
+# Core: /phonemes – wav2vec2 + optional Phonemizer IPA with fallback
 # ----------------------------------------------------------------------
 @app.post("/phonemes")
 async def phonemes(
@@ -219,19 +219,19 @@ async def phonemes(
     lang: str = Query("en", description="Language code: en, es, fr, de, it, pt, zh, ja"),
 ):
     """
-    Accept a WAV file + language code and return a purely "phoneme-oriented" view.
+    Accept a WAV file + language code and return a phoneme-oriented view.
 
-    IMPORTANT DESIGN CHOICE:
-    ------------------------
-    - The *computational core* of SoundMirror/Letter Practice should not care about words.
-    - This endpoint therefore exposes only:
-        * wav2vec2 transcription (for debugging / feeding phonemizer),
-        * IPA string, IPA units,
-        * a 'phoneme_list' derived from the IPA units,
-        * a simple 'phonemes' string for convenience (joined with '-').
-    - No attempt is made to guess a real word like "WHAT" or "THEM" for scoring.
+    DESIGN:
+    - wav2vec2 gives us a rough transcription (e.g. "PAH", "POH", "tenna").
+    - We *try* to get IPA via phonemizer.
+    - If IPA is available:
+        * phoneme_list = IPA units
+        * phonemes = IPA units joined with "-"
+    - If IPA is NOT available:
+        * phoneme_list = simple syllable tokens from wav2vec2 transcription
+        * phonemes = those tokens joined with "-"
+    - No attempt is made to guess dictionary words for scoring.
     """
-    # Basic content-type check; we still just want WAV here.
     if file.content_type not in (
         "audio/wav",
         "audio/x-wav",
@@ -252,7 +252,6 @@ async def phonemes(
         waveform = load_and_resample_to_16k(wav_bytes)
 
         # 2) Run wav2vec2 → rough transcription (characters/letters)
-        #    We treat this as an internal stepping stone ONLY, not as the final "truth".
         with torch.no_grad():
             inputs = processor(
                 waveform,
@@ -265,29 +264,31 @@ async def phonemes(
             decoded = processor.batch_decode(predicted_ids)
             transcription = decoded[0].strip() if decoded else ""
 
-        # 3) Phonemizer: get IPA for the transcription
-        #    This is our "alien phoneme world" representation.
+        # 3) Try Phonemizer: get IPA for the transcription
         ipa_str = get_ipa_for_text(transcription, lang) if transcription else ""
         ipa_units = ipa_str.split() if ipa_str else []
 
-        # 4) Build the phoneme_list and a simple string representation
-        #    For now, we treat IPA units as the phoneme_list that the frontend can work with.
-        phoneme_list = ipa_units
+        # 4) Build the phoneme_list with a robust fallback
+        if ipa_units:
+            # Preferred path: true IPA units from phonemizer
+            phoneme_list = ipa_units
+        else:
+            # Fallback: use wav2vec2's transcription as syllable-like units
+            fallback = transcription.lower().strip()
+            phoneme_list = fallback.split() if fallback else []
+
         phonemes_joined = "-".join(phoneme_list) if phoneme_list else ""
 
         return JSONResponse(
             content={
                 "lang": lang,
-                "backend": "wav2vec2+phonemizer",
-                # "alien" phoneme outputs:
-                "ipa": ipa_str,               # full IPA string
-                "ipa_units": ipa_units,       # list of IPA segments
-                "phoneme_list": phoneme_list, # alias for frontend / SoundMirror
-                "phonemes": phonemes_joined,  # convenience string (e.g. "m-ɛ-n-ə")
+                "backend": "wav2vec2+phonemizer(fallback)",
+                "ipa": ipa_str or None,          # full IPA string (or null)
+                "ipa_units": ipa_units,          # may be empty
+                "phoneme_list": phoneme_list,    # canonical list of units
+                "phonemes": phonemes_joined,     # e.g. "poh" or "poh-ah"
                 "model": LANG_MODELS[lang],
-                # Debug-only field: the intermediate text wav2vec2 guessed
-                # (You can choose NOT to show this to end users.)
-                "raw_transcription": transcription,
+                "raw_transcription": transcription,  # wav2vec2's guess (debug)
             }
         )
 
