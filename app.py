@@ -6,6 +6,7 @@ import soundfile as sf
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
 
 # Import IPA helper from phoneme/ipa_lookup.py
@@ -21,6 +22,15 @@ torch.set_num_interop_threads(1)
 # App bootstrap
 # ----------------------------------------------------------------------
 app = FastAPI(title="Base44 Multi-Language wav2vec2 Backend")
+
+# CORS: allow frontend (Base44, preview hosts, etc.) to call this backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # you can later restrict this if desired
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 TARGET_SR = 16000
 MAX_SECONDS_SENTENCE = 10
@@ -172,6 +182,13 @@ def load_and_resample_to_16k(wav_bytes: bytes) -> torch.Tensor:
         waveform = waveform[:MAX_SAMPLES_SENTENCE]
 
     return waveform
+
+# ----------------------------------------------------------------------
+# Utility: health check
+# ----------------------------------------------------------------------
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 # ----------------------------------------------------------------------
 # Utility: list languages
